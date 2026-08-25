@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data-center-monitoring
+  labels:
+    name: data-center-monitoring
+    app.kubernetes.io/part-of: data-center-monitoring

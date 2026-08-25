@@ -6,7 +6,7 @@ inclusive hard metric bounds, and simulation threshold assumptions.
 """
 
 from dataclasses import dataclass, field
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,6 @@ class MetricBounds:
 
 
 # Inclusive hard simulation bounds for generic data-center servers.
-# Note: These are simulation assumptions, not universal hardware specifications.
 HARD_BOUNDS: Dict[str, MetricBounds] = {
     "cpu_utilization": MetricBounds(0.0, 100.0),
     "memory_utilization": MetricBounds(0.0, 100.0),
@@ -47,6 +46,31 @@ SIMULATION_THRESHOLDS: Dict[str, Dict[str, Tuple[float, float]]] = {
 }
 
 
+def calculate_server_shard(total_servers: int, shard_index: int, total_shards: int) -> Tuple[int, int]:
+    """
+    Deterministically computes 1-based start and end server indices for a given shard.
+    
+    Handles non-divisible total_servers across total_shards seamlessly.
+    """
+    if total_shards <= 0:
+        raise ValueError("total_shards must be > 0")
+    if shard_index < 0 or shard_index >= total_shards:
+        raise ValueError(f"shard_index ({shard_index}) must be in range [0, {total_shards - 1}]")
+
+    base_per_shard = total_servers // total_shards
+    remainder = total_servers % total_shards
+
+    if shard_index < remainder:
+        count = base_per_shard + 1
+        start = shard_index * count + 1
+    else:
+        count = base_per_shard
+        start = remainder * (base_per_shard + 1) + (shard_index - remainder) * count + 1
+
+    end = start + count - 1
+    return start, end
+
+
 @dataclass
 class SimulationConfig:
     """Configurable simulation parameters."""
@@ -60,6 +84,9 @@ class SimulationConfig:
     incident_chance: float = 0.05      # low frequency global incident probability
     incident_min_duration: int = 6     # minimum duration in steps/ticks
     incident_max_duration: int = 15    # maximum duration in steps/ticks
+
+    server_start_index: Optional[int] = None  # 1-indexed start server ID for sharding
+    server_end_index: Optional[int] = None    # 1-indexed end server ID for sharding
 
     @property
     def total_servers(self) -> int:

@@ -50,37 +50,42 @@ class DataCenterSimulator:
             self.inject_scenario(self.scenario)
 
     def _initialize_topology(self) -> None:
-        """Construct rack and server topology with diverse baselines."""
+        """Construct rack and server topology with diverse baselines and server sharding support."""
         server_counter = 1
         profiles = list(WorkloadProfile)
+
+        start_idx = self.config.server_start_index or 1
+        end_idx = self.config.server_end_index or self.config.total_servers
 
         for r in range(1, self.config.num_racks + 1):
             rack_id = f"RACK{r:02d}"
             for s in range(1, self.config.servers_per_rack + 1):
-                server_id = f"SRV{server_counter:03d}"
+                srv_num = server_counter
+                server_id = f"SRV{srv_num:03d}"
                 server_counter += 1
 
-                # Select workload profile deterministically or round-robin based on server ID
-                profile = profiles[(server_counter - 2) % len(profiles)]
+                if start_idx <= srv_num <= end_idx:
+                    # Select workload profile deterministically or round-robin based on srv_num
+                    profile = profiles[(srv_num - 1) % len(profiles)]
 
-                # Build server-specific baselines
-                baseline = self._create_server_baseline(server_id, rack_id, profile)
-                self.servers.append(baseline)
-                self.incident_states[server_id] = IncidentState()
+                    # Build server-specific baselines
+                    baseline = self._create_server_baseline(server_id, rack_id, profile)
+                    self.servers.append(baseline)
+                    self.incident_states[server_id] = IncidentState()
 
-                # Initialize state values with baseline
-                self.server_states[server_id] = {
-                    "cpu": baseline.base_cpu,
-                    "memory": baseline.base_memory,
-                    "disk": baseline.base_disk,
-                    "network_in": baseline.base_network_in,
-                    "network_out": baseline.base_network_out,
-                    "temperature": 24.0,  # Ambient thermal baseline °C
-                    "power": 320.0,
-                    "fan_speed": 3000.0,
-                    "disk_read": baseline.base_disk_read,
-                    "disk_write": baseline.base_disk_write,
-                }
+                    # Initialize state values with baseline
+                    self.server_states[server_id] = {
+                        "cpu": baseline.base_cpu,
+                        "memory": baseline.base_memory,
+                        "disk": baseline.base_disk,
+                        "network_in": baseline.base_network_in,
+                        "network_out": baseline.base_network_out,
+                        "temperature": 24.0,  # Ambient thermal baseline °C
+                        "power": 320.0,
+                        "fan_speed": 3000.0,
+                        "disk_read": baseline.base_disk_read,
+                        "disk_write": baseline.base_disk_write,
+                    }
 
     def _create_server_baseline(
         self, server_id: str, rack_id: str, profile: WorkloadProfile

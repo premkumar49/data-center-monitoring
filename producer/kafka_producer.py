@@ -15,7 +15,7 @@ from typing import List, Optional, Any
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from producer.models import TelemetryRecord
-from producer.server_config import SimulationConfig
+from producer.server_config import SimulationConfig, calculate_server_shard
 from producer.simulator import DataCenterSimulator
 
 
@@ -130,6 +130,19 @@ def parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
     env_test = os.getenv("TEST_MODE", "false").lower() in ("true", "1", "yes")
     env_records = int(os.getenv("RECORDS_COUNT", "20"))
 
+    # Sharding environment variables
+    env_start_idx = int(os.getenv("SERVER_START_INDEX")) if os.getenv("SERVER_START_INDEX") else None
+    env_end_idx = int(os.getenv("SERVER_END_INDEX")) if os.getenv("SERVER_END_INDEX") else None
+    env_shard_idx = int(os.getenv("SHARD_INDEX")) if os.getenv("SHARD_INDEX") else None
+    env_total_shards = int(os.getenv("TOTAL_SHARDS")) if os.getenv("TOTAL_SHARDS") else None
+
+    # Hostname / Pod name ordinal fallback for StatefulSet or Kubernetes pods (e.g. telemetry-simulator-1)
+    pod_name = os.getenv("POD_NAME", os.getenv("HOSTNAME", ""))
+    if env_shard_idx is None and "-" in pod_name:
+        parts = pod_name.split("-")
+        if parts[-1].isdigit():
+            env_shard_idx = int(parts[-1])
+
     parser = argparse.ArgumentParser(
         description="Data Center Telemetry Kafka Producer CLI"
     )
@@ -201,17 +214,50 @@ def parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
         default=env_scenario,
         help="Inject a specific incident scenario deterministically.",
     )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=env_shard_idx,
+        help="0-based shard index for replica server partitioning.",
+    )
+    parser.add_argument(
+        "--total-shards",
+        type=int,
+        default=env_total_shards,
+        help="Total number of replica shards.",
+    )
+    parser.add_argument(
+        "--server-start-index",
+        type=int,
+        default=env_start_idx,
+        help="Explicit 1-based start server ID for sharding.",
+    )
+    parser.add_argument(
+        "--server-end-index",
+        type=int,
+        default=env_end_idx,
+        help="Explicit 1-based end server ID for sharding.",
+    )
     return parser.parse_args(args_list)
 
 
 def main() -> None:
     args = parse_args()
 
+    start_idx = args.server_start_index
+    end_idx = args.server_end_index
+
+    if (start_idx is None or end_idx is None) and (args.shard_index is not None and args.total_shards is not None):
+        total_servers = args.racks * args.servers_per_rack
+        start_idx, end_idx = calculate_server_shard(total_servers, args.shard_index, args.total_shards)
+
     config = SimulationConfig(
         num_racks=args.racks,
         servers_per_rack=args.servers_per_rack,
         telemetry_interval=args.interval,
         enable_incidents=not args.disable_incidents,
+        server_start_index=start_idx,
+        server_end_index=end_idx,
     )
 
     simulator = DataCenterSimulator(
@@ -257,7 +303,10 @@ def main() -> None:
         else:
             # Continuous Mode
             print(f"Starting continuous telemetry streaming to {args.topic} at {args.bootstrap_server}...")
-            print(f"Topology: {config.num_racks} racks x {config.servers_per_rack} servers ({config.num_racks * config.servers_per_rack} servers total)")
+            assigned_count = len(simulator.servers)
+            start_str = f"SRV{config.server_start_index:03d}" if config.server_start_index else "SRV001"
+            end_str = f"SRV{config.server_end_index:03d}" if config.server_end_index else f"SRV{config.total_servers:03d}"
+            print(f"Assigned Shard: {start_str}..{end_str} ({assigned_count} servers assigned)")
             print(f"Interval: {config.telemetry_interval}s. Press Ctrl+C to stop.")
             while True:
                 step_records = simulator.generate_step()
