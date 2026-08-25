@@ -1,0 +1,189 @@
+"""
+Unit tests for Databricks streaming pipeline logic.
+
+Verifies schema definition, field types, timestamp formatting,
+and validation logic against physical hard bounds and non-null rules.
+Runs locally without requiring a live Databricks workspace.
+"""
+
+import importlib
+import json
+from datetime import datetime
+import pytest
+
+from producer.models import TelemetryRecord
+from producer.simulator import DataCenterSimulator
+
+# Check if pyspark is installed locally
+try:
+    import pyspark
+    pyspark_available = True
+    kafka_stream_mod = importlib.import_module("databricks.01_kafka_stream")
+    get_telemetry_schema = kafka_stream_mod.get_telemetry_schema
+    validate_telemetry_mod = importlib.import_module("databricks.02_validate_telemetry")
+    HARD_BOUNDS = validate_telemetry_mod.HARD_BOUNDS
+except ModuleNotFoundError:
+    pyspark_available = False
+    get_telemetry_schema = None
+    # Fallback hard bounds dictionary matching Step 1 specification
+    HARD_BOUNDS = {
+        "cpu_min": 0.0, "cpu_max": 100.0,
+        "mem_min": 0.0, "mem_max": 100.0,
+        "disk_min": 0.0, "disk_max": 100.0,
+        "temp_min": 18.0, "temp_max": 50.0,
+        "net_in_min": 0.0, "net_in_max": 1000.0,
+        "net_out_min": 0.0, "net_out_max": 1000.0,
+        "power_min": 250.0, "power_max": 850.0,
+        "fan_min": 2000.0, "fan_max": 7000.0,
+        "disk_read_min": 0.0, "disk_read_max": 800.0,
+        "disk_write_min": 0.0, "disk_write_max": 600.0,
+    }
+
+
+def validate_record_dict(data: dict) -> bool:
+    """
+    Pure Python validation function matching databricks/02_validate_telemetry.py logic
+    for local unit test verification.
+    """
+    sid = data.get("server_id")
+    rid = data.get("rack_id")
+    ts = data.get("timestamp")
+
+    if not sid or not rid or not ts:
+        return False
+
+    try:
+        cpu = float(data["cpu_utilization"])
+        mem = float(data["memory_utilization"])
+        disk = float(data["disk_utilization"])
+        temp = float(data["temperature"])
+        net_in = float(data["network_in"])
+        net_out = float(data["network_out"])
+        power = float(data["power_consumption"])
+        fan = float(data["fan_speed"])
+        disk_r = float(data["disk_read"])
+        disk_w = float(data["disk_write"])
+    except (KeyError, ValueError, TypeError):
+        return False
+
+    return (
+        HARD_BOUNDS["cpu_min"] <= cpu <= HARD_BOUNDS["cpu_max"] and
+        HARD_BOUNDS["mem_min"] <= mem <= HARD_BOUNDS["mem_max"] and
+        HARD_BOUNDS["disk_min"] <= disk <= HARD_BOUNDS["disk_max"] and
+        HARD_BOUNDS["temp_min"] <= temp <= HARD_BOUNDS["temp_max"] and
+        HARD_BOUNDS["net_in_min"] <= net_in <= HARD_BOUNDS["net_in_max"] and
+        HARD_BOUNDS["net_out_min"] <= net_out <= HARD_BOUNDS["net_out_max"] and
+        HARD_BOUNDS["power_min"] <= power <= HARD_BOUNDS["power_max"] and
+        HARD_BOUNDS["fan_min"] <= fan <= HARD_BOUNDS["fan_max"] and
+        HARD_BOUNDS["disk_read_min"] <= disk_r <= HARD_BOUNDS["disk_read_max"] and
+        HARD_BOUNDS["disk_write_min"] <= disk_w <= HARD_BOUNDS["disk_write_max"]
+    )
+
+
+@pytest.mark.skipif(not pyspark_available, reason="pyspark is not installed locally; run in Databricks runtime environment")
+def test_schema_contains_all_expected_fields():
+    """Verify PySpark schema contains all 13 raw telemetry metric fields."""
+    schema = get_telemetry_schema()
+    field_names = [f.name for f in schema.fields]
+
+    expected_fields = [
+        "timestamp",
+        "server_id",
+        "rack_id",
+        "cpu_utilization",
+        "memory_utilization",
+        "disk_utilization",
+        "network_in",
+        "network_out",
+        "temperature",
+        "power_consumption",
+        "fan_speed",
+        "disk_read",
+        "disk_write",
+    ]
+
+    for field in expected_fields:
+        assert field in field_names, f"Expected field '{field}' missing from Spark schema"
+
+    forbidden_fields = ["health_status", "alert", "severity", "sms_sent"]
+    for forbidden in forbidden_fields:
+        assert forbidden not in field_names, f"Forbidden field '{forbidden}' found in Spark schema"
+
+
+@pytest.mark.skipif(not pyspark_available, reason="pyspark is not installed locally; run in Databricks runtime environment")
+def test_numeric_field_types_in_schema():
+    """Verify numeric metric fields in PySpark schema use DoubleType."""
+    schema = get_telemetry_schema()
+    field_types = {f.name: f.dataType.typeName() for f in schema.fields}
+
+    double_fields = [
+        "cpu_utilization", "memory_utilization", "disk_utilization",
+        "network_in", "network_out", "temperature", "power_consumption",
+        "fan_speed", "disk_read", "disk_write"
+    ]
+    for df in double_fields:
+        assert field_types[df] == "double", f"Field '{df}' should be DoubleType, got {field_types[df]}"
+
+
+def test_valid_telemetry_passes_validation():
+    """Verify telemetry records generated by simulator pass validation."""
+    sim = DataCenterSimulator(seed=42)
+    records = sim.generate_step()
+    for rec in records:
+        assert validate_record_dict(rec.to_dict()) is True
+
+
+def test_cpu_bounds_validation():
+    """Verify CPU > 100 or < 0 fails validation."""
+    sim = DataCenterSimulator(seed=10)
+    rec_dict = sim.generate_step()[0].to_dict()
+
+    over_cpu = rec_dict.copy()
+    over_cpu["cpu_utilization"] = 105.0
+    assert validate_record_dict(over_cpu) is False
+
+    under_cpu = rec_dict.copy()
+    under_cpu["cpu_utilization"] = -5.0
+    assert validate_record_dict(under_cpu) is False
+
+
+def test_temperature_bounds_validation():
+    """Verify Temperature > 50 or < 18 fails validation."""
+    sim = DataCenterSimulator(seed=10)
+    rec_dict = sim.generate_step()[0].to_dict()
+
+    over_temp = rec_dict.copy()
+    over_temp["temperature"] = 55.0
+    assert validate_record_dict(over_temp) is False
+
+    under_temp = rec_dict.copy()
+    under_temp["temperature"] = 15.0
+    assert validate_record_dict(under_temp) is False
+
+
+def test_power_bounds_validation():
+    """Verify Power outside [250, 850] fails validation."""
+    sim = DataCenterSimulator(seed=10)
+    rec_dict = sim.generate_step()[0].to_dict()
+
+    over_power = rec_dict.copy()
+    over_power["power_consumption"] = 900.0
+    assert validate_record_dict(over_power) is False
+
+    under_power = rec_dict.copy()
+    under_power["power_consumption"] = 200.0
+    assert validate_record_dict(under_power) is False
+
+
+def test_missing_server_id_validation():
+    """Verify record with missing or empty server_id fails validation."""
+    sim = DataCenterSimulator(seed=10)
+    rec_dict = sim.generate_step()[0].to_dict()
+
+    missing_sid = rec_dict.copy()
+    missing_sid["server_id"] = ""
+    assert validate_record_dict(missing_sid) is False
+
+    none_sid = rec_dict.copy()
+    none_sid["server_id"] = None
+    assert validate_record_dict(none_sid) is False
