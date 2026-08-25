@@ -37,23 +37,40 @@ class KafkaTelemetryProducer:
         self.topic = topic
         self.producer = producer_instance
 
-    def connect(self) -> None:
-        """Establish connection to Kafka broker."""
+    def connect(self, max_retries: int = 1, retry_interval: float = 3.0) -> None:
+        """
+        Establish connection to Kafka broker, with configurable retries and backoff.
+        
+        Args:
+            max_retries: Maximum number of connection attempts before failing.
+            retry_interval: Time in seconds between connection retries.
+        """
         if self.producer is not None:
             return
 
-        try:
-            from kafka import KafkaProducer
-            self.producer = KafkaProducer(
-                bootstrap_servers=self.bootstrap_servers,
-                request_timeout_ms=1000,
-                max_block_ms=1000,
-                retries=1,
-            )
-        except Exception as e:
-            raise ConnectionError(
-                f"Unable to connect to Kafka at {self.bootstrap_servers}: {e}"
-            ) from e
+        attempt = 0
+        while True:
+            try:
+                from kafka import KafkaProducer
+                self.producer = KafkaProducer(
+                    bootstrap_servers=self.bootstrap_servers,
+                    request_timeout_ms=3000,
+                    max_block_ms=3000,
+                    retries=1,
+                )
+                print(f"Connected to Kafka broker at {self.bootstrap_servers}")
+                return
+            except Exception as e:
+                attempt += 1
+                if attempt >= max_retries:
+                    raise ConnectionError(
+                        f"Unable to connect to Kafka at {self.bootstrap_servers}: {e}"
+                    ) from e
+                print(
+                    f"Waiting for Kafka broker at {self.bootstrap_servers} "
+                    f"(attempt {attempt}/{max_retries})... {e}"
+                )
+                time.sleep(retry_interval)
 
     def send(self, record: TelemetryRecord, sync: bool = True, timeout: float = 10.0) -> Any:
         """
@@ -102,59 +119,72 @@ class KafkaTelemetryProducer:
 
 
 def parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
+    env_bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    env_topic = os.getenv("KAFKA_TOPIC", "server_telemetry")
+    env_interval = float(os.getenv("TELEMETRY_INTERVAL", "5.0"))
+    env_racks = int(os.getenv("NUM_RACKS", "5"))
+    env_servers = int(os.getenv("SERVERS_PER_RACK", "4"))
+    env_incidents = os.getenv("ENABLE_INCIDENTS", "true").lower() in ("true", "1", "yes")
+    env_scenario = os.getenv("SCENARIO", None)
+    env_seed = int(os.getenv("SEED")) if os.getenv("SEED") else None
+    env_test = os.getenv("TEST_MODE", "false").lower() in ("true", "1", "yes")
+    env_records = int(os.getenv("RECORDS_COUNT", "20"))
+
     parser = argparse.ArgumentParser(
         description="Data Center Telemetry Kafka Producer CLI"
     )
     parser.add_argument(
         "--bootstrap-server",
         type=str,
-        default="localhost:9092",
-        help="Kafka broker bootstrap server (default: localhost:9092).",
+        default=env_bootstrap,
+        help=f"Kafka broker bootstrap server (default: {env_bootstrap}).",
     )
     parser.add_argument(
         "--topic",
         type=str,
-        default="server_telemetry",
-        help="Target Kafka topic (default: server_telemetry).",
+        default=env_topic,
+        help=f"Target Kafka topic (default: {env_topic}).",
     )
     parser.add_argument(
         "--test",
         action="store_true",
+        default=env_test,
         help="Run in finite test mode without continuous sleeping.",
     )
     parser.add_argument(
         "--records",
         type=int,
-        default=20,
-        help="Number of telemetry events to generate and send in test mode (default: 20).",
+        default=env_records,
+        help=f"Number of telemetry events to generate and send in test mode (default: {env_records}).",
     )
     parser.add_argument(
         "--interval",
         type=float,
-        default=5.0,
-        help="Telemetry interval in seconds for continuous mode (default: 5.0).",
+        default=env_interval,
+        help=f"Telemetry interval in seconds for continuous mode (default: {env_interval}).",
     )
     parser.add_argument(
         "--racks",
         type=int,
-        default=5,
-        help="Number of racks in topology (default: 5).",
+        default=env_racks,
+        help=f"Number of racks in topology (default: {env_racks}).",
     )
     parser.add_argument(
         "--servers-per-rack",
         type=int,
-        default=4,
-        help="Number of servers per rack (default: 4).",
+        default=env_servers,
+        help=f"Number of servers per rack (default: {env_servers}).",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=env_seed,
         help="Optional random seed for reproducible simulation.",
     )
     parser.add_argument(
         "--disable-incidents",
         action="store_true",
+        default=not env_incidents,
         help="Disable automatic random incident generation.",
     )
     parser.add_argument(
@@ -168,7 +198,7 @@ def parse_args(args_list: Optional[List[str]] = None) -> argparse.Namespace:
             "network_congestion",
             "memory_pressure",
         ],
-        default=None,
+        default=env_scenario,
         help="Inject a specific incident scenario deterministically.",
     )
     return parser.parse_args(args_list)
@@ -193,8 +223,11 @@ def main() -> None:
         topic=args.topic,
     )
 
+    max_retries = int(os.getenv("KAFKA_CONNECT_RETRIES", "10"))
+    retry_interval = float(os.getenv("KAFKA_CONNECT_RETRY_INTERVAL", "3.0"))
+
     try:
-        producer.connect()
+        producer.connect(max_retries=max_retries, retry_interval=retry_interval)
     except Exception as e:
         print(f"Error: Unable to connect to Kafka at {args.bootstrap_server}")
         print(f"Details: {e}")
